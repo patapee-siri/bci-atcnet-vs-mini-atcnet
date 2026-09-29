@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# raw dataset (download separately, see README) and trained model artifacts -- not for version control
+data/
+saved_models*/
+*.gdf
+*.keras
+*.pkl
