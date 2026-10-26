@@ -25,7 +25,7 @@ from sklearn.model_selection import StratifiedKFold
 from sklearn.preprocessing import StandardScaler
 
 from .augment import augment_batch
-from .config import (DEFAULT_AUGMENT_RATIO, DEFAULT_BATCH_SIZE, DEFAULT_EPOCHS, DEFAULT_LR,
+from .config import (DATA_DIR, DEFAULT_AUGMENT_RATIO, DEFAULT_BATCH_SIZE, DEFAULT_EPOCHS, DEFAULT_LR,
                       DEFAULT_N_FOLDS, DEFAULT_PATIENCE, DEFAULT_WARMUP_EPOCHS, MODEL_CONFIGS,
                       N_CLASSES, SAVE_DIR_ROOT, SEED)
 from .data import load_subject_epochs
@@ -40,7 +40,7 @@ tf.config.optimizer.set_jit(False)  # see README / notebook fix-history: avoids 
 def run_subject(subject, config_name, save_dir_root=SAVE_DIR_ROOT, epochs=DEFAULT_EPOCHS,
                  batch_size=DEFAULT_BATCH_SIZE, lr=DEFAULT_LR, patience=DEFAULT_PATIENCE,
                  n_folds=DEFAULT_N_FOLDS, augment_ratio=DEFAULT_AUGMENT_RATIO,
-                 warmup_epochs=DEFAULT_WARMUP_EPOCHS):
+                 warmup_epochs=DEFAULT_WARMUP_EPOCHS, data_dir=DATA_DIR):
     """Train and evaluate one subject with subject-dependent K-fold CV for one model config.
 
     Returns a list of per-fold result dicts (also written to
@@ -50,13 +50,15 @@ def run_subject(subject, config_name, save_dir_root=SAVE_DIR_ROOT, epochs=DEFAUL
     os.makedirs(save_dir, exist_ok=True)
     model_kwargs = MODEL_CONFIGS[config_name]
 
-    X, y = load_subject_epochs(subject, session='T')
+    X, y = load_subject_epochs(subject, session='T', data_dir=data_dir)
     n_chans, n_samples = X.shape[1], X.shape[2]
 
     skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=SEED)
     fold_results = []
 
     for fold, (train_idx, test_idx) in enumerate(skf.split(X, y), start=1):
+        # leakage guard: a trial must never sit in both the training and the test partition
+        assert np.intersect1d(train_idx, test_idx).size == 0, 'train/test trial overlap'
         X_tr_raw, y_tr = X[train_idx], y[train_idx]
         X_te_raw, y_te = X[test_idx], y[test_idx]
 
@@ -140,6 +142,7 @@ def main():
     parser.add_argument('--subject', type=int, required=True)
     parser.add_argument('--config', type=str, required=True, choices=list(MODEL_CONFIGS.keys()))
     parser.add_argument('--save_dir_root', type=str, default=SAVE_DIR_ROOT)
+    parser.add_argument('--data_dir', type=str, default=DATA_DIR)
     parser.add_argument('--epochs', type=int, default=DEFAULT_EPOCHS)
     parser.add_argument('--batch_size', type=int, default=DEFAULT_BATCH_SIZE)
     parser.add_argument('--lr', type=float, default=DEFAULT_LR)
@@ -151,7 +154,8 @@ def main():
 
     run_subject(subject=args.subject, config_name=args.config, save_dir_root=args.save_dir_root,
                 epochs=args.epochs, batch_size=args.batch_size, lr=args.lr, patience=args.patience,
-                n_folds=args.n_folds, augment_ratio=args.augment_ratio, warmup_epochs=args.warmup_epochs)
+                n_folds=args.n_folds, augment_ratio=args.augment_ratio, warmup_epochs=args.warmup_epochs,
+                data_dir=args.data_dir)
 
 
 if __name__ == '__main__':
