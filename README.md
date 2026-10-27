@@ -90,9 +90,10 @@ dependent on a separate compression algorithm's own behavior.
 All experiments use the BCI Competition IV-2a dataset (Tangermann et al., 2012), comprising EEG
 recordings from nine subjects performing four classes of motor imagery: left hand, right hand,
 foot, and tongue. Each subject contributed 288 trials in the labeled training session, recorded from
-22 EEG channels at 250 Hz. Only the labeled session ("T") is used, since the evaluation session
-("E") in this dataset does not carry ground-truth labels usable for the subject-dependent protocol
-adopted here.
+22 EEG channels at 250 Hz. Only the labeled session ("T") is used. The GDF files of the evaluation
+session ("E") do not contain labels; the organizers released the true labels separately as a
+`true_labels` archive, which this study does not use because it evaluates within the training
+session only.
 
 ### 3.2 Preprocessing and Epoching
 
@@ -169,6 +170,16 @@ monitors validation loss rather than validation accuracy, since a model that col
 a single class for every trial produces a flat validation accuracy curve that would otherwise be
 misread by early stopping as convergence.
 
+**Protocol versions.** All results in Section 4 come from the first protocol version (v1), run on
+Kaggle. In v1 the inner 85/15 split was an unstratified random permutation drawn from NumPy's global
+random number generator, and the augmentation reseeded that same generator, so the validation split
+of one fold depended on the augmentation draws of the preceding fold. Validation class composition
+was not logged. The code in `src/` implements protocol v2: every fold derives independent random
+generators from the triple (seed, subject, fold), the inner split is stratified by class,
+TensorFlow is seeded per fold, and each fold's result records the validation class counts and trial
+indices. Protocol v2 results will differ slightly and have not yet been produced, so every number
+reported here should be read as protocol v1 with a single seed.
+
 ### 3.6 Evaluation Metrics
 
 For each of the forty-five subject-fold runs per configuration, the following are recorded: overall
@@ -177,6 +188,12 @@ time per trial, the number of epochs actually run, and whether the fold's predic
 single dominant class (defined as more than 90 percent of predictions falling into one class).
 Results are aggregated as the mean and standard deviation across all forty-five runs per
 configuration, and separately broken down per subject and per class.
+
+To quantify the consistency of the accuracy gap, each subject's accuracy is averaged over its five
+folds and the two configurations are compared with a paired, two-sided Wilcoxon signed-rank test
+across subjects, together with a bootstrap 95 percent confidence interval of the mean paired
+difference (20,000 resamples of subjects). The five folds of a subject share training data and are
+therefore not treated as independent observations.
 
 ## 4. Results
 
@@ -192,6 +209,8 @@ configuration, and separately broken down per subject and per class.
 | Mean inference time per trial | 110.2ms (SD 4.9ms) | 62.0ms (SD 3.8ms) |
 | Accuracy points per million parameters | 5.8 | 68.4 |
 | Mode-collapsed folds | 0 of 45 | 0 of 45 |
+
+*All values are from protocol v1 with a single seed (Section 3.5).*
 
 ![Accuracy, training speed, and inference speed comparison](results/atcnet_vs_mini_comparison.png)
 
@@ -228,17 +247,29 @@ were already the most difficult for the full model, rather than degrading all cl
 
 ### 4.3 Accuracy-Efficiency Trade-off
 
-![Parameter count vs accuracy trade-off](results/atcnet_vs_mini_efficiency.png)
+![Accuracy against model size](results/atcnet_vs_mini_efficiency.png)
 
-*Figure 4. Mean accuracy against trainable parameter count (logarithmic scale).*
+*Figure 4. Accuracy against trainable parameter count (logarithmic scale). Faint dots are per-subject
+means (n = 9), large markers are group means with 95 percent bootstrap confidence intervals over
+subjects, and marker area is proportional to inference latency. The inset reports the paired
+comparison across subjects. Results are from protocol v1 with a single seed.*
 
-Expressed as a single trade-off statement: Mini-ATCNet gives up 11.9 percentage points of mean
-accuracy relative to ATCNet_full in exchange for a 93 percent reduction in parameter count, a 44
-percent reduction in training time per fold, and a 44 percent reduction in inference time per trial.
-Normalized by parameter count, Mini-ATCNet delivers approximately twelve times more accuracy per
-million parameters than ATCNet_full (68.4 versus 5.8 accuracy points per million parameters), which
-is the relevant comparison when the binding deployment constraint is model size or memory footprint
-rather than absolute accuracy.
+Mini-ATCNet gives up 11.9 percentage points of mean accuracy relative to ATCNet_full (95 percent
+bootstrap CI of the paired difference [+9.6, +14.5]) in exchange for a 93 percent reduction in
+parameter count, a 44 percent reduction in training time per fold, and a 44 percent reduction in
+inference time per trial. ATCNet_full was more accurate for all nine subjects (Wilcoxon signed-rank
+test, two-sided p = 0.0039, the smallest value attainable with nine subjects). The confidence
+intervals of the two group means overlap in the figure because accuracy varies widely between
+subjects. The paired comparison removes this between-subject variation by comparing each subject
+with themselves, which is why the interval of the difference excludes zero.
+
+These statistics describe how consistent the direction of the gap is across subjects. They do not
+establish the size of the effect beyond this dataset: there are only nine subjects, the five folds of
+a subject share training data and were not treated as independent, and each configuration was
+trained with a single seed. Normalized by parameter count, Mini-ATCNet delivers approximately twelve
+times more accuracy per million parameters than ATCNet_full (68.4 versus 5.8 accuracy points per
+million parameters), which is the relevant comparison when the binding deployment constraint is
+model size or memory footprint rather than absolute accuracy.
 
 ## 5. Discussion
 
@@ -253,9 +284,10 @@ may be entirely justified.
 
 It is also worth noting that the 66.8 percent mean accuracy obtained for ATCNet_full in this study
 is not directly comparable to the 81.10 percent reported in the original ATCNet publication, since
-the two figures are produced under different evaluation protocols. The original work evaluates on a
-held-out session using the dataset's own train/test session split, whereas this study evaluates
-using subject-dependent five-fold cross-validation within a single session. The absolute accuracy
+the two figures are produced under different evaluation protocols. The official repository reports
+its figure for training on the first session and testing on the second session of each subject,
+whereas this study evaluates using subject-dependent five-fold cross-validation within a single
+session. The absolute accuracy
 figures reported here should therefore be read as an internally consistent comparison between the
 two configurations under one protocol, not as a reproduction of ATCNet's original reported result.
 
@@ -274,6 +306,11 @@ two configurations under one protocol, not as a reproduction of ATCNet's origina
   constraint values were applied to both ATCNet_full and Mini-ATCNet. Given the large difference in
   parameter count between the two, this regularization strength may be well suited to the larger
   model while being unnecessarily restrictive for the smaller one.
+- **A single random seed and the first protocol version.** Each configuration was trained once per
+  fold, so variability due to weight initialization is not measured, and the confidence intervals
+  above reflect variation across subjects only. The reported run also used protocol v1, whose
+  validation split was coupled across folds, unstratified, and not logged (Section 3.5). Rerunning
+  under protocol v2 with several seeds will change the numbers slightly.
 - **No architecture-level comparison against the original ATCNet protocol.** As discussed in
   Section 5, the accuracy figures reported here are not directly comparable to the original ATCNet
   publication's reported accuracy, since the evaluation protocols differ.
@@ -324,7 +361,7 @@ bci-atcnet-vs-mini-atcnet/
 │   ├── model.py         (ATCNet architecture blocks, build_atcnet, LRWarmup callback)
 │   └── train.py          (subject dependent five fold CV training loop and CLI entrypoint)
 └── results/
-    ├── generate_plots.py                     (regenerates the figures above from the notebook's own recorded output)
+    ├── generate_plots.py                     (regenerates the earlier figure set from the notebook's recorded output; Figure 4 in its current form is not produced by this script)
     ├── atcnet_vs_mini_comparison.png
     ├── atcnet_vs_mini_per_subject.png
     ├── atcnet_vs_mini_efficiency.png
@@ -341,12 +378,14 @@ contains the same training logic split into importable modules, runnable directl
 ```bash
 pip install -r requirements.txt
 
-python -m src.train --subject 1 --config Mini-ATCNet --save_dir_root ./saved_models
-python -m src.train --subject 1 --config ATCNet_full --save_dir_root ./saved_models
+python -m src.train --subject 1 --config Mini-ATCNet --data_dir /path/to/BCICIV_2a_gdf --save_dir_root ./saved_models
+python -m src.train --subject 1 --config ATCNet_full --data_dir /path/to/BCICIV_2a_gdf --save_dir_root ./saved_models
 ```
 
-Set `DATA_DIR` in `src/config.py` (or pass `data_dir=` to `load_subject_epochs`) to point at a
-local copy of the dataset instead of the Kaggle mount path.
+The `--data_dir` flag points at a local copy of the dataset instead of the Kaggle mount path used as
+the default in `src/config.py`. Each run writes one JSON file per subject; every fold entry records
+the test predictions, timing, the protocol version, and the validation size, class counts, and trial
+indices of that fold.
 
 ### Dataset
 
@@ -358,8 +397,11 @@ Not redistributed here due to size and licensing.
 The BCI Competition IV-2a dataset was made available by its original organizers and contributors
 (Tangermann et al., 2012). The ATCNet architecture and its official implementation, which this
 project reimplements and extends with a lightweight variant, are due to Altaheri, Muhammad, and
-Alsulaiman (2023). All model training in this project was performed on Kaggle's freely provided
-Tesla T4 GPU infrastructure.
+Alsulaiman (2023). The official ATCNet implementation is released under the Apache License 2.0;
+`src/model.py` is a reimplementation based on that code and credits its authors. Thanks also to an
+external reviewer who, in a GitHub comment, pointed out the random number generator coupling between
+the validation split and the augmentation, which led to protocol v2. All model training in this
+project was performed on Kaggle's freely provided Tesla T4 GPU infrastructure.
 
 ## References
 
