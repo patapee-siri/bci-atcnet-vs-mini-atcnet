@@ -21,7 +21,7 @@ import time
 import numpy as np
 import tensorflow as tf
 from sklearn.metrics import accuracy_score, cohen_kappa_score, f1_score
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import StratifiedKFold, train_test_split
 from sklearn.preprocessing import StandardScaler
 
 from .augment import augment_batch
@@ -31,10 +31,34 @@ from .config import (DATA_DIR, DEFAULT_AUGMENT_RATIO, DEFAULT_BATCH_SIZE, DEFAUL
 from .data import load_subject_epochs
 from .model import LRWarmup, build_atcnet
 
-np.random.seed(SEED)
-tf.random.set_seed(SEED)
+# No global np.random.seed / tf.random.set_seed here on purpose: every fold derives its own
+# generators from (SEED, subject, fold) via fold_rngs(), so no fold's randomness depends on
+# another fold having run first, and a single fold can be rerun in isolation.
 tf.config.optimizer.set_jit(False)  # see README / notebook fix-history: avoids a growing XLA
 # recompile cost when input shapes vary slightly across folds/runs.
+
+PROTOCOL_VERSION = 2  # 1 = original Kaggle run (global RNG, unstratified 85/15 split)
+
+
+def fold_rngs(subject, fold):
+    """Independent random sources for one fold, derived only from (SEED, subject, fold).
+
+    Returns (split_rng, aug_rng, tf_seed): generators for the inner validation split and for the
+    augmentation, plus an integer seed for TensorFlow/Keras weight initialisation and dropout.
+    """
+    split_ss, aug_ss, tf_ss = np.random.SeedSequence([SEED, subject, fold]).spawn(3)
+    tf_seed = int(tf_ss.generate_state(1)[0] % (2 ** 31 - 1))
+    return np.random.default_rng(split_ss), np.random.default_rng(aug_ss), tf_seed
+
+
+def stratified_inner_split(y, rng, val_frac=0.15):
+    """Class-stratified inner train/validation split; returns indices into `y`.
+
+    Stratification keeps every class present in the validation set with near-equal proportions,
+    so early stopping on val_loss is not driven by a class-skewed validation sample.
+    """
+    return train_test_split(np.arange(len(y)), test_size=val_frac, stratify=y,
+                            random_state=int(rng.integers(2 ** 31 - 1)))
 
 
 def run_subject(subject, config_name, save_dir_root=SAVE_DIR_ROOT, epochs=DEFAULT_EPOCHS,
@@ -62,14 +86,16 @@ def run_subject(subject, config_name, save_dir_root=SAVE_DIR_ROOT, epochs=DEFAUL
         X_tr_raw, y_tr = X[train_idx], y[train_idx]
         X_te_raw, y_te = X[test_idx], y[test_idx]
 
-        val_split = int(0.85 * len(X_tr_raw))
-        perm = np.random.permutation(len(X_tr_raw))
-        tr_i, va_i = perm[:val_split], perm[val_split:]
+        split_rng, aug_rng, tf_seed = fold_rngs(subject, fold)
+        tr_i, va_i = stratified_inner_split(y_tr, split_rng)
+        assert np.intersect1d(tr_i, va_i).size == 0, 'inner train/validation trial overlap'
         X_tr, y_tr_f = X_tr_raw[tr_i], y_tr[tr_i]
         X_va, y_va_f = X_tr_raw[va_i], y_tr[va_i]
+        val_class_counts = np.bincount(y_va_f, minlength=N_CLASSES)
+        val_trial_idx = train_idx[va_i]
 
         # augment the inner-training split only, before scaling -- never touches val/test
-        X_tr, y_tr_f = augment_batch(X_tr, y_tr_f, ratio=augment_ratio, rng_seed=SEED + fold)
+        X_tr, y_tr_f = augment_batch(X_tr, y_tr_f, ratio=augment_ratio, rng=aug_rng)
 
         scaler = StandardScaler()
         n_tr = X_tr.shape[0]
@@ -81,6 +107,7 @@ def run_subject(subject, config_name, save_dir_root=SAVE_DIR_ROOT, epochs=DEFAUL
         X_va_in = X_va_flat[..., np.newaxis].astype('float32')
         X_te_in = X_te_flat[..., np.newaxis].astype('float32')
 
+        tf.keras.utils.set_random_seed(tf_seed)  # per-fold weight init / dropout, independent of fold order
         model = build_atcnet(N_CLASSES, n_chans, n_samples, model_name=config_name, **model_kwargs)
         model.compile(optimizer=tf.keras.optimizers.Adam(lr), loss='sparse_categorical_crossentropy',
                       metrics=['accuracy'])
@@ -118,7 +145,9 @@ def run_subject(subject, config_name, save_dir_root=SAVE_DIR_ROOT, epochs=DEFAUL
         f1 = f1_score(y_te, y_pred, average='macro')
         kappa = cohen_kappa_score(y_te, y_pred)
         fold_results.append({
-            'config': config_name, 'subject': subject, 'fold': fold,
+            'config': config_name, 'subject': subject, 'fold': fold, 'protocol_version': PROTOCOL_VERSION,
+            'val_size': int(len(va_i)), 'val_class_counts': val_class_counts.tolist(),
+            'val_trial_idx': val_trial_idx.tolist(),
             'accuracy': float(acc), 'f1_macro': float(f1), 'kappa': float(kappa),
             'train_time_s': train_time, 'n_epochs': n_epochs_run,
             'test_time_s_total': test_time, 'test_time_ms_per_trial': (test_time / len(y_te)) * 1000,
@@ -128,7 +157,8 @@ def run_subject(subject, config_name, save_dir_root=SAVE_DIR_ROOT, epochs=DEFAUL
         collapse_flag = '  [COLLAPSED]' if collapsed else ''
         print(f'  [{config_name}] Subject {subject} fold {fold}: acc={acc:.3f} f1={f1:.3f} '
               f'train={train_time:.1f}s ({n_epochs_run} epochs) '
-              f'test={(test_time / len(y_te)) * 1000:.2f}ms/trial pred_counts={pred_counts.tolist()}{collapse_flag}')
+              f'test={(test_time / len(y_te)) * 1000:.2f}ms/trial pred_counts={pred_counts.tolist()} '
+              f'val_counts={val_class_counts.tolist()}{collapse_flag}')
 
     out_path = os.path.join(save_dir, f'S{subject:02d}_results.json')
     with open(out_path, 'w') as f:
